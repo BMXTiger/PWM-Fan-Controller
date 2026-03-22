@@ -21,7 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
+#include <stdio.h>
+#include "stm32l4xx_hal_pwr.h"
+#include "ssd1306.h"
+#include "fonts.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,7 +57,56 @@ TIM_HandleTypeDef htim1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+//ADC: for input V, output I, total I, manual fan speed
+#define ADC_CHANNELS 4
+#define ADC_SCANS   100
+#define ADC_BUF_LEN (ADC_CHANNELS * ADC_SCANS)
 
+uint16_t ADC_VAL[ADC_BUF_LEN];
+uint16_t inputV; // to store 12 bit ADC reading, input +12V
+uint16_t totalI; // to store 12 bit ADC reading, total current of module
+uint16_t outputI; // to store 12 bit ADC reading, output current of fan
+int isADCFinished = 0;
+int count = 0;
+
+//I2C: Temp sensor
+static const uint8_t TMP102_ADDR = 0x48 << 1; // use 8-bit address, left shift 1 bit as the last bit indicates read/write
+static const uint8_t REG_TEMP = 0x00;
+
+//I2C: Display
+static const uint8_t SSD1306_ADDR = 0x3c << 1; // b0111100 slave address
+static const uint8_t REG_SSD = 0x00;
+
+void ProcessScan(uint16_t *ptr)
+{
+    // ptr points to the start of a full scan
+	// So, this function takes one scan’s ADC results and immediately applies them to PWM.
+    TIM1->CCR1 = ptr[0]; // CH5 manual PWM adjust with pot
+    inputV = ptr[1]; // CH6 +12V input voltage
+    totalI = ptr[2]; // CH9 total system current
+    outputI = ptr[3]; // CH10 output load current
+}
+
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
+	// This is called automatically by the HAL when DMA has filled half of your buffer.
+	// ADC_BUF_LEN = total size of the buffer (number of ADC values, e.g., 30 for 10 scans × 3 channels).
+{
+    for(int i = 0; i < (ADC_BUF_LEN/2); i += ADC_CHANNELS)
+    	// i steps by ADC_CHANNELS because each scan contains multiple channel readings.
+    	// So each iteration processes one full scan.
+        ProcessScan(&ADC_VAL[i]);
+    	// Result: As soon as half the buffer is filled, the PWM gets updated scan by scan without waiting for the full buffer.
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+	// This is called when the entire DMA buffer is filled.
+{
+    for(int i = ADC_BUF_LEN/2; i < ADC_BUF_LEN; i += ADC_CHANNELS)
+    	// Loop starts at ADC_BUF_LEN/2 → the second half of the buffer.
+    	// Processes each scan in the second half.
+        ProcessScan(&ADC_VAL[i]);
+    	// Result: The second half of your buffer is now applied to PWM, while the first half might already be being refilled by DMA (circular mode).
+}
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -84,6 +137,13 @@ int main(void)
 
   /* USER CODE BEGIN 1 */
 
+	char msg[10]; // 10 character buffer for UART
+
+	HAL_StatusTypeDef ret; //return value for errors
+	uint8_t buf[12];
+	int16_t val; //store raw temp data from TMP102
+	float temp_c; //floating point variable to transmit data as decimal value
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -112,6 +172,37 @@ int main(void)
   MX_USART2_UART_Init();
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+//  HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_2);
+  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);  // Calibrate
+
+  HAL_ADC_Start_DMA(&hadc1, (uint32_t*)ADC_VAL, ADC_BUF_LEN);
+
+  // Init lcd using one of the stm32HAL i2c typedefs
+  if (ssd1306_Init(&hi2c3) != 0) {
+    Error_Handler();
+  }
+  HAL_Delay(1000);
+
+  ssd1306_Fill(Black);
+  ssd1306_UpdateScreen(&hi2c3);
+
+  HAL_Delay(1000);
+
+  // Write data to local screenbuffer
+  ssd1306_SetCursor(0, 0);
+  ssd1306_WriteString("Welcome!", Font_11x18, White);
+
+//  ssd1306_Fill(White);
+  // Draw rectangle on screen
+  //for (uint8_t i=0; i<28; i++) {
+    //  for (uint8_t j=0; j<15; j++) {
+       //   ssd1306_DrawPixel(0+i, 0+j, White);
+     // }
+  //}
+
+  // Copy all data from local screenbuffer to the screen
+  ssd1306_UpdateScreen(&hi2c3);
 
   /* USER CODE END 2 */
 
@@ -119,6 +210,89 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+	  //Tell TMP102 that we want to read from the temperature register
+	  buf[0] = REG_TEMP; //set first byte of buffer to location of TMP102 temperature register
+
+	  //address of i2c peripheral, TMP102 address (0x00 for temperature), pointer to buffer, how many bytes we want to send, timeout
+	  ret = HAL_I2C_Master_Transmit(&hi2c1, TMP102_ADDR, buf, 1, HAL_MAX_DELAY);
+
+	  //if anything other than HAL_OK, error msg
+	  if (ret != HAL_OK)
+	  {
+		  strcpy((char*)buf, "Error Tx\r\n");
+	  } else {
+
+		  // Read 2 bytes from the temperature register
+		  ret = HAL_I2C_Master_Receive(&hi2c1, TMP102_ADDR, buf, 2, HAL_MAX_DELAY);
+		  if (ret != HAL_OK)
+		  {
+			  strcpy((char*)buf, "Error Rx\r\n");
+		  } else {
+
+			  // Combine the bytes
+			  val = ((int16_t)buf[0] << 4) | (buf[1] >> 4);
+
+			  // Convert to 2's complement, since temperature can be negative
+			  if (val > 0x7FF)
+			  {
+				  val |= 0xF000;
+			  }
+
+			  // Convert to float temperature value (Celsius)
+			  temp_c = val * 0.0625;
+
+			  // Convert temperature to decimal format
+			  temp_c *= 100;
+			  if (temp_c > 3000) // greater than 30 degrees C
+			  {
+			      sprintf((char*)buf,"Temp High -> Entering STOP mode\r\n");
+			      HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
+
+			      HAL_Delay(100); // ensure UART finishes
+
+			      // Suspend SysTick interrupt
+			      HAL_SuspendTick();
+
+			      // Enter STOP mode (wait for interrupt)
+			      HAL_PWR_EnterSTOPMode(PWR_LOWPOWERREGULATOR_ON, PWR_STOPENTRY_WFI);
+
+			      // MCU resumes here after wake-up
+
+			      // Reconfigure system clock
+			      SystemClock_Config();
+
+			      // Resume SysTick
+			      HAL_ResumeTick();
+
+			      // Reset button has been pressed msg
+			      sprintf((char*)buf,"Reset -> Resuming Operation\r\n");
+
+			  } else {
+				  sprintf((char*)buf,
+						  "%u.%02u C\r\n", // 2 decimal places string
+						  ((unsigned int)temp_c / 100),
+						  ((unsigned int)temp_c % 100));
+
+			  }
+		  }
+
+	  }
+
+
+	  // Send out buffer (temperature or error msg)
+	  HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
+
+	  // Send out ADC readings
+//  	  sprintf(msg, "%hu\r\n", inputV);
+//  	  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+  	  count++;
+
+	  // Wait
+	  HAL_Delay(500);
+	  //	  strcpy((char*)buf, "Hello!\r\n");
+	  //	  HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
+
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
