@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include <string.h>
 #include <stdio.h>
+#include "stm32l4xx_hal.h"
 #include "stm32l4xx_hal_pwr.h"
 #include "ssd1306.h"
 #include "fonts.h"
@@ -140,6 +141,7 @@ int main(void)
 	char msg[10]; // 10 character buffer for UART
 
 	HAL_StatusTypeDef ret; //return value for errors
+  char dispMsg[16]; // 16 character buffer for display
 	uint8_t buf[12];
 	int16_t val; //store raw temp data from TMP102
 	float temp_c; //floating point variable to transmit data as decimal value
@@ -192,7 +194,10 @@ int main(void)
   // Write data to local screenbuffer
   ssd1306_SetCursor(0, 0);
   ssd1306_WriteString("Welcome!", Font_11x18, White);
-
+  ssd1306_UpdateScreen(&hi2c3);
+  HAL_Delay(2000);
+  ssd1306_Fill(Black);
+  ssd1306_UpdateScreen(&hi2c3);
 //  ssd1306_Fill(White);
   // Draw rectangle on screen
   //for (uint8_t i=0; i<28; i++) {
@@ -244,12 +249,20 @@ int main(void)
 			  // Convert temperature to decimal format
 			  temp_c *= 100;
 			  if (temp_c > 3000) // greater than 30 degrees C
-			  {
+			  {   
+        
+            ssd1306_Fill(Black);
+            ssd1306_UpdateScreen(&hi2c3);
 			      sprintf((char*)buf,"Temp High -> Entering STOP mode\r\n");
+           
 			      HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
 
 			      HAL_Delay(100); // ensure UART finishes
-
+            //Reassign display message to entirely new string
+            strcpy(dispMsg, "OT>Reset");
+            ssd1306_SetCursor(0, 0);
+            ssd1306_WriteString(dispMsg, Font_11x18, White);
+            ssd1306_UpdateScreen(&hi2c3);
 			      // Suspend SysTick interrupt
 			      HAL_SuspendTick();
 
@@ -266,32 +279,43 @@ int main(void)
 
 			      // Reset button has been pressed msg
 			      sprintf((char*)buf,"Reset -> Resuming Operation\r\n");
+            ssd1306_Fill(Black);
+            ssd1306_UpdateScreen(&hi2c3);
+            strcpy(dispMsg, "Resuming");
+            ssd1306_SetCursor(0, 0);
+            ssd1306_WriteString(dispMsg, Font_11x18, White);
+            ssd1306_UpdateScreen(&hi2c3);
+            HAL_Delay(1000);
+            ssd1306_Fill(Black);
+            ssd1306_UpdateScreen(&hi2c3);
 
 			  } else {
+
 				  sprintf((char*)buf,
 						  "%u.%02u C\r\n", // 2 decimal places string
 						  ((unsigned int)temp_c / 100),
 						  ((unsigned int)temp_c % 100));
+          sprintf((char*)dispMsg,
+						  "%u.%02u C", // 2 decimal places string
+						  ((unsigned int)temp_c / 100),
+						  ((unsigned int)temp_c % 100));
 
+          // Update display with latest temperature reading
+          ssd1306_SetCursor(0, 0);
+          ssd1306_WriteString(dispMsg, Font_11x18, White);
+          ssd1306_UpdateScreen(&hi2c3);
 			  }
 		  }
 
 	  }
-
+    
 
 	  // Send out buffer (temperature or error msg)
 	  HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
-
-	  // Send out ADC readings
-//  	  sprintf(msg, "%hu\r\n", inputV);
-//  	  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-  	  count++;
+  	count++;
 
 	  // Wait
 	  HAL_Delay(500);
-	  //	  strcpy((char*)buf, "Hello!\r\n");
-	  //	  HAL_UART_Transmit(&huart2, buf, strlen((char*)buf), HAL_MAX_DELAY);
-
 
     /* USER CODE END WHILE */
 
